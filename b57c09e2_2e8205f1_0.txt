@@ -1,0 +1,66 @@
+create(double permitsPerSecond, SleepingStopwatch stopwatch)--function
+	rateLimiter = new SmoothBursty(stopwatch, 1.0)--function
+		this.maxBurstSeconds = maxBurstSeconds	// 初始化最多存储几秒的令牌
+	rateLimiter.setRate(permitsPerSecond)--function
+		doSetRate(permitsPerSecond, stopwatch.readMicros())--function
+			resync(nowMicros)--function
+				if(nowMicros > nextFreeTicketMicros)	// 如果当前时间 > 下次获取令牌时间
+					double newPermits = (nowMicros - nextFreeTicketMicros) / coolDownIntervalMicros();	// 计算这段时间可以生成的令牌
+					storedPermits = min(maxPermits, storedPermits + newPermits);	// 将令牌存储起来
+					nextFreeTicketMicros = nowMicros;	// 将下次获取令牌的时间更新为当前时间
+			double stableIntervalMicros = SECONDS.toMicros(1L) / permitsPerSecond;	// 计算生成1个令牌的时间间隔
+			doSetRate(permitsPerSecond, stableIntervalMicros)--function
+				double oldMaxPermits = this.maxPermits;
+				maxPermits = maxBurstSeconds * permitsPerSecond;	// 计算最大可以存储多少个令牌
+				storedPermits =(oldMaxPermits == 0.0)? 0.0: storedPermits * maxPermits / oldMaxPermits;	// 修改存储的令牌数量，不能超过新的最大值
+
+acquire(int permits)--function
+	long microsToWait = reserve(permits)--function
+		return reserveAndGetWaitLength(permits, stopwatch.readMicros())--function
+			long momentAvailable = reserveEarliestAvailable(permits, nowMicros);--function
+				long returnValue = nextFreeTicketMicros;	// 保存下次获取令牌时间
+				resync(nowMicros)	// 判断nowMicros是否大于nextFreeTicketMicros，如果为true，则将这段时间生成的令牌存储起来，并将nextFreeTicketMicros更新为nowMicros
+				double storedPermitsToSpend = min(requiredPermits, this.storedPermits);	// 选择requiredPermits和storedPermits中较小的一个
+				double freshPermits = requiredPermits - storedPermitsToSpend;	// 有足够的令牌，还是不够？
+				long waitMicros = + (long) (freshPermits * stableIntervalMicros);  // 当令牌不够时，应该等多久
+				this.nextFreeTicketMicros = LongMath.saturatedAdd(nextFreeTicketMicros, waitMicros);	// 更新下次获取令牌时间
+				this.storedPermits -= storedPermitsToSpend;	// 减少存储令牌
+				return returnValue;	// 返回旧的获取令牌时间
+			return max(momentAvailable - nowMicros, 0);	// 返回等待时间
+	stopwatch.sleepMicrosUninterruptibly(microsToWait);	// 阻塞，且只有睡眠时间结束才可被中断
+	return 1.0 * microsToWait / SECONDS.toMicros(1L);	// 返回阻塞时间
+
+/**
+ * The work (permits) of how many seconds can be saved up if this RateLimiter is unused?
+ * 在RateLimiter未使用时，最多存储几秒的令牌
+ * */
+ final double maxBurstSeconds;
+ 
+
+/**
+ * The currently stored permits.
+ * 当前存储令牌数
+ */
+double storedPermits;
+
+/**
+ * The maximum number of stored permits.
+ * 最大存储令牌数 =  maxBurstSeconds * permitsPerSecond;
+ */
+double maxPermits;
+
+/**
+ * The interval between two unit requests, at our stable rate. E.g., a stable rate of 5 permits
+ * per second has a stable interval of 200ms.
+ * 添加令牌时间间隔 = SECONDS.toMicros(1L) / permitsPerSecond；(1秒/每秒的令牌数)
+ */
+double stableIntervalMicros;
+
+/**
+ * The time when the next request (no matter its size) will be granted. After granting a request,
+ * this is pushed further in the future. Large requests push this further than small requests.
+ * 下一次请求可以获取令牌的起始时间
+ * 由于RateLimiter允许预消费，上次请求预消费令牌后
+ * 下次请求需要等待相应的时间到nextFreeTicketMicros时刻才可以获取令牌
+ */
+private long nextFreeTicketMicros = 0L; // could be either in the past or future
